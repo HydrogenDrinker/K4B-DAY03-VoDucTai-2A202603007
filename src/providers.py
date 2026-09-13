@@ -37,8 +37,53 @@ class MockOfflineProvider(BaseLLMProvider):
     def generate_with_tools(self, prompt: str, tools_schema: List[Dict[str, Any]], system_prompt: str = "") -> Dict[str, Any]:
         prompt_lower = prompt.lower()
         
-        # Mô phỏng nhận diện intent gọi Tool
-        if "sv2026001" in prompt_lower and "đặt lịch" in prompt_lower:
+        # Kiểm tra nếu đã có kết quả observation đặt lịch thành công
+        if "bk-" in prompt_lower or "đặt lịch thành công" in prompt_lower:
+            return {
+                "type": "text",
+                "content": "[Mock Agent Response]: Lịch hẹn tư vấn học vụ đã được đặt thành công trên hệ thống VinUni.",
+                "thought": "Đã có kết quả đặt lịch từ MCP Server. Xuất câu trả lời hoàn tất cho sinh viên."
+            }
+
+        # Multi-step: Nếu đã tra cứu được cố vấn TS. Lê Thị B từ bước 1 và người dùng yêu cầu đặt lịch
+        if "ts. lê thị b" in prompt_lower and ("đặt lịch" in prompt_lower or "hẹn" in prompt_lower):
+            return {
+                "type": "tool_call",
+                "tool_name": "schedule_appointment",
+                "arguments": {"student_id": "SV2026002", "datetime_str": "09:00 20/09/2026", "advisor_name": "TS. Lê Thị B"},
+                "thought": "Đã tìm thấy cố vấn của sinh viên SV2026002 là TS. Lê Thị B. Bước 2: Gọi tool schedule_appointment để đặt lịch hẹn."
+            }
+
+        # Kiểm tra nếu đã có observation tra cứu học vụ đơn bước
+        if "status\": \"success" in prompt_lower or "gpa" in prompt_lower or "not_found" in prompt_lower:
+            if "not_found" in prompt_lower:
+                return {
+                    "type": "text",
+                    "content": "[Mock Agent Response]: Không tìm thấy dữ liệu sinh viên trong cơ sở dữ liệu học vụ VinUni.",
+                    "thought": "Công cụ trả về NOT_FOUND, trả lời thông báo lịch sự không bịa đặt dữ liệu."
+                }
+            return {
+                "type": "text",
+                "content": "[Mock Agent Response]: Đã tra cứu thành công thông tin học vụ của sinh viên từ hệ thống.",
+                "thought": "Đã nhận được thông tin học vụ từ MCP Server. Đưa ra câu trả lời cuối cùng."
+            }
+
+        # Step 1 Intent dispatch
+        if "sv2026002" in prompt_lower:
+            return {
+                "type": "tool_call",
+                "tool_name": "academic_query",
+                "arguments": {"student_id": "SV2026002"},
+                "thought": "Người dùng yêu cầu tra cứu thông tin sinh viên SV2026002 trước để lấy tên cố vấn học tập."
+            }
+        elif "sv9999999" in prompt_lower:
+            return {
+                "type": "tool_call",
+                "tool_name": "academic_query",
+                "arguments": {"student_id": "SV9999999"},
+                "thought": "Người dùng yêu cầu tra cứu mã sinh viên SV9999999. Tôi sẽ gọi tool academic_query."
+            }
+        elif "đặt lịch" in prompt_lower or "hẹn" in prompt_lower:
             return {
                 "type": "tool_call",
                 "tool_name": "schedule_appointment",
@@ -55,7 +100,7 @@ class MockOfflineProvider(BaseLLMProvider):
         else:
             return {
                 "type": "text",
-                "content": f"[Mock Agent Response]: Xin chào! Quy chế học vụ VinUni yêu cầu sinh viên tích lũy tối thiểu 120 tín chỉ và duy trì GPA trên 2.0 để tốt nghiệp.",
+                "content": "[Mock Agent Response]: Xin chào! Quy chế học vụ VinUni yêu cầu sinh viên tích lũy tối thiểu 120 tín chỉ và duy trì GPA trên 2.0 để tốt nghiệp.",
                 "thought": "Câu hỏi chung về quy chế học vụ, trả lời trực tiếp không cần gọi Tool."
             }
 
@@ -64,7 +109,7 @@ class GeminiProvider(BaseLLMProvider):
     """Google Gemini Provider (Native Tool Calling với Google GenAI SDK)"""
     def __init__(self, api_key: str = None, model: str = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model_name = model or os.getenv("LLM_MODEL") or "gemini-2.5-flash"
+        self.model_name = model or os.getenv("LLM_MODEL") or "gemini-3.6-flash"
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         if not self.api_key or self.api_key == "your_gemini_api_key_here":
@@ -83,56 +128,65 @@ class GeminiProvider(BaseLLMProvider):
             print("ℹ️ [Gemini Provider]: Chưa tìm thấy GEMINI_API_KEY hợp lệ. Tự động chuyển sang Mock Offline.")
             return MockOfflineProvider().generate_with_tools(prompt, tools_schema, system_prompt)
         
-        try:
-            from google import genai
-            from google.genai import types
+        import time
+        from google import genai
+        from google.genai import types
 
-            client = genai.Client(api_key=self.api_key)
-            
-            # Chuẩn hóa function declarations cho Gemini SDK
-            function_declarations = []
-            for tool in tools_schema:
-                # Bỏ qua các tool schema chưa được định nghĩa hoàn chỉnh
-                if not tool.get("name") or not tool.get("parameters"):
+        client = genai.Client(api_key=self.api_key)
+        
+        # Chuẩn hóa function declarations cho Gemini SDK
+        function_declarations = []
+        for tool in tools_schema:
+            # Bỏ qua các tool schema chưa được định nghĩa hoàn chỉnh
+            if not tool.get("name") or not tool.get("parameters"):
+                continue
+            function_declarations.append({
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters", {})
+            })
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt if system_prompt else None,
+            tools=[{"function_declarations": function_declarations}] if function_declarations else None,
+            temperature=0.2
+        )
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config
+                )
+
+                # Kiểm tra xem Gemini có trả về Tool Call không
+                if response.function_calls:
+                    call = response.function_calls[0]
+                    args = dict(call.args) if hasattr(call, 'args') and call.args else {}
+                    return {
+                        "type": "tool_call",
+                        "tool_name": call.name,
+                        "arguments": args,
+                        "thought": f"Gemini quyết định gọi công cụ '{call.name}' với tham số: {json.dumps(args, ensure_ascii=False)}"
+                    }
+                else:
+                    return {
+                        "type": "text",
+                        "content": response.text or "",
+                        "thought": "Gemini phản hồi trực tiếp bằng văn bản (không cần gọi công cụ)."
+                    }
+
+            except Exception as e:
+                err_msg = str(e)
+                if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < max_retries - 1:
+                    wait_sec = 12 * (attempt + 1)
+                    print(f"⏳ [Gemini Rate Limit]: Đang đợi {wait_sec}s để hồi phục quota (lần {attempt + 1}/{max_retries})...")
+                    time.sleep(wait_sec)
                     continue
-                function_declarations.append({
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("parameters", {})
-                })
-
-            config = types.GenerateContentConfig(
-                system_instruction=system_prompt if system_prompt else None,
-                tools=[{"function_declarations": function_declarations}] if function_declarations else None,
-                temperature=0.2
-            )
-
-            response = client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=config
-            )
-
-            # Kiểm tra xem Gemini có trả về Tool Call không
-            if response.function_calls:
-                call = response.function_calls[0]
-                args = dict(call.args) if hasattr(call, 'args') and call.args else {}
-                return {
-                    "type": "tool_call",
-                    "tool_name": call.name,
-                    "arguments": args,
-                    "thought": f"Gemini quyết định gọi công cụ '{call.name}' với tham số: {json.dumps(args, ensure_ascii=False)}"
-                }
-            else:
-                return {
-                    "type": "text",
-                    "content": response.text or "",
-                    "thought": "Gemini phản hồi trực tiếp bằng văn bản (không cần gọi công cụ)."
-                }
-
-        except Exception as e:
-            print(f"⚠️ [Gemini API Warning]: Không thể kết nối live API ({str(e)}). Tự động fallback về Mock.")
-            return MockOfflineProvider().generate_with_tools(prompt, tools_schema, system_prompt)
+                print(f"⚠️ [Gemini API Warning]: Không thể kết nối live API ({err_msg}). Tự động fallback về Mock.")
+                return MockOfflineProvider().generate_with_tools(prompt, tools_schema, system_prompt)
 
 
 class OpenAIProvider(BaseLLMProvider):
